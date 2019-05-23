@@ -1,22 +1,24 @@
-from extract_func.extract_tweets import extract_tweets
-from extract_func.extract_tweets import extract_counts
-from extract_func.extract_tweets_api import extract_tweets_api
-from extract_func.extract_tweets_api import extract_counts_api
-from extract_func.got_supplement_API_data import get_API_data
-import pandas as pd
-import numpy as np
-from TwitterAPI import TwitterAPI
-from TwitterAPI import TwitterPager
-import json
-import networkx as nx
-from ast import literal_eval
-
 # define a user object
-class User():
+class User(object):
+    def __init__(self, screen_name, follower_count):
+        self.screen_name = screen_name
+        self.follower_count = follower_count
+
+# define tweet objects
+class Tweet(object):
+    def __init__(self, user_mentions, rt_names,author_name):
+        self.user_mentions = user_mentions
+        self.rt_names = rt_names
+        self.author_name = author_name
 
 
 # function to build a messaging network from a set of tweets
 def build_msg_net(tweet_df):
+    import pandas as pd
+    import numpy as np
+    import json
+    import networkx as nx
+    from ast import literal_eval
     def _leval(x):
         try:
             return literal_eval(x)
@@ -26,47 +28,57 @@ def build_msg_net(tweet_df):
     # transform dict/list strings to actual dict/list objects
     tweet_df['user_mentions'] = tweet_df['user_mentions'].apply(_leval)
     tweet_df['rt_names'] = tweet_df['rt_names'].apply(_leval)
+    tweet_df['rt_follower_counts'] = tweet_df['rt_follower_counts'].apply(_leval)
+
+    # transform created_by to a datetime value
+    tweet_df['created_at'] = pd.to_datetime(tweet_df['created_at'])
 
     # get unique list of tagged and author accounts
     # authors - just take unique values of data frame
-    authors = tweet_df.author_name.unique().tolist()
+    authors = tweet_df[['author_name', 'author_followers']]
+    authors = authors.drop_duplicates('author_name')
+    # create a dictionary of user objects to store user information
+    user_dict = {}
+    for i,row in authors.iterrows():
+        user_dict[row.author_name] = User(row.author_name,row.author_followers)
 
     # mentions - need to manipulate some because there are multiple mentions per tweet sometimes
     mentions = tweet_df['user_mentions'].values.tolist()
     # flatten list
     mentions = [i for j in mentions for i in j]
 
-    # retweeting users
-    retweeters = tweet_df['rt_names'].values.tolist()
-    # remove None values
-    retweeters = [i for i in retweeters if i]
-    # flatten list
-    retweeters = [i.replace('@','') for j in retweeters for i in j]
+    # if not already in users list, add to it. Don't know number of followers for mentions
+    # Followers are not counted as impressions anyways
+    for i in mentions:
+        if i not in user_dict.keys():
+            user_dict[i]= User(i,follower_count=np.nan)
 
-    # combine and dedup all the different interacting users
-    users = mentions + authors + retweeters
-    unique_nodes = list(set(users))
-    edge_pairs=[]
-    edge_attrib = []
-    # draw edges between users mentioning other users
-    for i, row in tweet_df.iterrows():
-        for j in row['user_mentions']:
-            edge_pairs.append([row.author_name, j])
-            # add edge attributes
-            edge_attrib.append({'favorites':row['favorite_count'],
-                'retweets':row['retweet_count']})
-        # draw edges between users replying to them
-        if row['rt_names'] is not None:
-            for j in row['rt_names']:
-                edge_pairs.append([row.author_name, j])
+    # do the same for retweeters retweeting users, but we also need to add their
+    # followers, since retweets do create impressions
+    retweeters = tweet_df[['rt_names','rt_follower_counts']]
+    for i,row in retweeters.iterrows():
+        if row.rt_names is not None:
+            for j,k in zip(row.rt_names, row.rt_follower_counts):
+                if j not in user_dict.keys():
+                    user_dict[j]= User(j,int(k))
+
 
     # create networkx network
     G= nx.DiGraph()
-    G.add_nodes_from(unique_nodes)
-    G.add_edges_from(edge_pairs)
-    import pdb; pdb.set_trace()
-    # add node characteristics
-    # number of followers
-    #replyer_nums =
-    nx.classes.function.set_node_attributes(G)
+    # add users as nodes
+    G.add_nodes_from([(node, {'follower_count': attr.follower_count}) for
+        (node, attr) in user_dict.items()])
+    # draw edges between users mentioning other users
+    for i, row in tweet_df.iterrows():
+        for j in row['user_mentions']:
+            G.add_edge(row.author_name, j,
+                favorites = row['favorite_count'],
+                retweets = row['retweet_count'],
+                date = row['created_at'])
+        # draw edges between users retweeting them
+        if row['rt_names'] is not None:
+            for j in row['rt_names']:
+                G.add_edge(j, row.author_name, date = row['created_at'],
+                retweets = 0,
+                favorites = 0)
     return(G)
